@@ -1,0 +1,109 @@
+# AndruinoIDE build workflow: paste this whole file into .github/workflows/main.yml of your own GitHub repo.
+#
+# It is small on purpose. The app sends the build script along with every request (script_gz), so this file never needs updating
+# when AndruinoIDE improves. Your sketch is compiled on GitHub's machine and only the firmware comes back to your phone.
+name: AndruinoIDE build
+run-name: compile ${{ inputs.job_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Unique id; the app uses it to find its own run"
+        required: true
+        type: string
+      fqbn:
+        description: "Board, e.g. arduino:avr:uno"
+        required: true
+        type: string
+      sketch_gz:
+        description: "Your sketch (gzip + base64), sent by the app"
+        required: true
+        type: string
+      script_gz:
+        description: "The build script (gzip + base64), sent by the app"
+        required: true
+        type: string
+      libs:
+        description: "Libraries to install, one per line"
+        required: false
+        default: ""
+        type: string
+      warnings:
+        description: "Compiler warnings"
+        required: false
+        default: "default"
+        type: string
+      optimize:
+        description: "Optimize for"
+        required: false
+        default: "default"
+        type: string
+      verbose:
+        description: "Verbose compiler output (true or false)"
+        required: false
+        default: "false"
+        type: string
+
+# One build at a time. (GitHub keeps only one waiting run per group, so the app waits for its build to finish.)
+concurrency:
+  group: compile
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: Compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Inputs go in through env vars only; they are never pasted into shell code.
+    env:
+      JOB_ID: ${{ inputs.job_id }}
+      FQBN: ${{ inputs.fqbn }}
+      SKETCH_GZ: ${{ inputs.sketch_gz }}
+      SCRIPT_GZ: ${{ inputs.script_gz }}
+      LIBS: ${{ inputs.libs }}
+      WARNINGS: ${{ inputs.warnings }}
+      OPTIMIZE: ${{ inputs.optimize }}
+      VERBOSE: ${{ inputs.verbose }}
+      GH_TOKEN: ${{ github.token }}
+    # The step names below are a contract with the app: it shows them as live progress.
+    steps:
+      - name: Get build script
+        run: printf '%s' "$SCRIPT_GZ" | base64 -d | gzip -dc | head -c 300000 > build.sh
+
+      - name: Check request
+        id: req
+        run: bash build.sh prepare
+
+      - name: Set up arduino-cli
+        run: bash build.sh cli
+
+      - name: Install board core
+        id: core
+        run: bash build.sh core
+
+      - name: Install libraries
+        run: bash build.sh libs
+
+      # The compiled ESP32 core (a few MB per board + option combination) is kept, so it is built once, not on every build.
+      - name: Restore compiled core
+        if: startsWith(inputs.fqbn, 'esp32:') && steps.core.outputs.bundle != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/andruino/build-cache/cores
+          key: core-${{ steps.core.outputs.bundle }}-${{ steps.req.outputs.corekey }}
+
+      - name: Compile sketch
+        run: bash build.sh compile
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ inputs.job_id }}
+          path: out/
+          retention-days: 1
+          if-no-files-found: warn
